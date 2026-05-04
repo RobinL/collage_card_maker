@@ -12,6 +12,7 @@ const state = {
     portrait: "bottom",
   },
   layoutMode: "auto",
+  packSeed: 1,
   gapMm: 3,
   marginMm: 4,
   photos: [],
@@ -61,8 +62,17 @@ app.innerHTML = `
           <button type="button" data-value="tall" aria-pressed="false">Tall</button>
           <button type="button" data-value="wide" aria-pressed="false">Wide</button>
           <button type="button" data-value="quilt" aria-pressed="false">Quilt</button>
+          <button type="button" data-value="pack" aria-pressed="false">Pack</button>
         </div>
       </div>
+
+      <button type="button" class="secondary-button tool-button" id="mixButton" hidden>
+        Mix it up
+      </button>
+
+      <button type="button" class="secondary-button tool-button" id="randomiseButton">
+        Randomise
+      </button>
 
       <div class="range-control">
         <label for="gapRange">Gap <output id="gapValue">3 mm</output></label>
@@ -118,6 +128,8 @@ const els = {
   dropzone: document.querySelector("#dropzone"),
   photoList: document.querySelector("#photoList"),
   exportButton: document.querySelector("#exportButton"),
+  mixButton: document.querySelector("#mixButton"),
+  randomiseButton: document.querySelector("#randomiseButton"),
   gapRange: document.querySelector("#gapRange"),
   gapValue: document.querySelector("#gapValue"),
   marginRange: document.querySelector("#marginRange"),
@@ -253,6 +265,25 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function createRandom(seed) {
+  let value = seed >>> 0;
+  return () => {
+    value = (value + 0x6D2B79F5) >>> 0;
+    let next = value;
+    next = Math.imul(next ^ (next >>> 15), next | 1);
+    next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
+    return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleArray(items, random = Math.random) {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  return items;
+}
+
 function buildCells(panelWidth, panelHeight, gap, margin) {
   syncSlots();
   const slotCount = getSlotCount();
@@ -276,7 +307,113 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
   if (state.layoutMode === "quilt") {
     return layoutQuilt(slotCount, panelWidth, panelHeight, gap, margin, aspects);
   }
+  if (state.layoutMode === "pack") {
+    return layoutPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+  }
   return layoutAuto(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+}
+
+function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
+  const innerWidth = Math.max(1, panelWidth - margin * 2);
+  const innerHeight = Math.max(1, panelHeight - margin * 2);
+  if (count <= 1) {
+    return [{ index: 0, x: margin, y: margin, width: innerWidth, height: innerHeight }];
+  }
+
+  const random = createRandom(state.packSeed + count * 97 + (state.orientation === "portrait" ? 17 : 0));
+  const items = aspects.map((aspect, index) => ({
+    index,
+    aspect: clamp(aspect * (0.82 + random() * 0.36), 0.45, 2.4),
+  }));
+
+  shuffleArray(items, random);
+
+  return packItemsIntoRect(items, {
+    x: margin,
+    y: margin,
+    width: innerWidth,
+    height: innerHeight,
+  }, gap, random)
+    .filter((cell) => cell.width > 1 && cell.height > 1)
+    .sort((a, b) => a.index - b.index);
+}
+
+function packItemsIntoRect(items, rect, gap, random) {
+  if (items.length === 1) {
+    return [{ index: items[0].index, ...rect }];
+  }
+
+  const split = findBestGroupSplit(items, rect, random);
+  const firstItems = items.slice(0, split.count);
+  const secondItems = items.slice(split.count);
+  const [firstRect, secondRect] = splitGroupRect(rect, firstItems, secondItems, split.orientation, gap);
+
+  return [
+    ...packItemsIntoRect(firstItems, firstRect, gap, random),
+    ...packItemsIntoRect(secondItems, secondRect, gap, random),
+  ];
+}
+
+function findBestGroupSplit(items, rect, random) {
+  let best = null;
+
+  for (let count = 1; count < items.length; count += 1) {
+    const firstItems = items.slice(0, count);
+    const secondItems = items.slice(count);
+    for (const orientation of ["vertical", "horizontal"]) {
+      const [firstRect, secondRect] = splitGroupRect(rect, firstItems, secondItems, orientation, 0);
+      const balancePenalty = Math.abs(firstItems.length - secondItems.length) / items.length;
+      const shapeScore = scoreGroupRect(firstItems, firstRect) + scoreGroupRect(secondItems, secondRect);
+      const orientationNudge = rect.width >= rect.height === (orientation === "vertical") ? -0.18 : 0.1;
+      const score = shapeScore + balancePenalty * 0.35 + orientationNudge + random() * 0.08;
+
+      if (!best || score < best.score) {
+        best = { count, orientation, score };
+      }
+    }
+  }
+
+  return best;
+}
+
+function scoreGroupRect(items, rect) {
+  const desired = groupAspect(items);
+  const aspect = rect.width / rect.height;
+  const extremePenalty = Math.abs(Math.log(aspect / clamp(aspect, 0.42, 2.45))) * 2.2;
+  return Math.abs(Math.log(aspect / desired)) + extremePenalty;
+}
+
+function groupAspect(items) {
+  if (items.length === 1) {
+    return items[0].aspect;
+  }
+  const average = items.reduce((sum, item) => sum + item.aspect, 0) / items.length;
+  return clamp(average, 0.62, 1.8);
+}
+
+function splitGroupRect(rect, firstItems, secondItems, orientation, gap) {
+  const firstWeight = groupWeight(firstItems);
+  const secondWeight = groupWeight(secondItems);
+
+  if (orientation === "vertical") {
+    const usableWidth = Math.max(1, rect.width - gap);
+    const firstWidth = usableWidth * (firstWeight / (firstWeight + secondWeight));
+    return [
+      { x: rect.x, y: rect.y, width: firstWidth, height: rect.height },
+      { x: rect.x + firstWidth + gap, y: rect.y, width: usableWidth - firstWidth, height: rect.height },
+    ];
+  }
+
+  const usableHeight = Math.max(1, rect.height - gap);
+  const firstHeight = usableHeight * (firstWeight / (firstWeight + secondWeight));
+  return [
+    { x: rect.x, y: rect.y, width: rect.width, height: firstHeight },
+    { x: rect.x, y: rect.y + firstHeight + gap, width: rect.width, height: usableHeight - firstHeight },
+  ];
+}
+
+function groupWeight(items) {
+  return items.reduce((sum, item) => sum + Math.sqrt(item.aspect), 0);
 }
 
 function layoutAuto(count, panelWidth, panelHeight, gap, margin, aspects, forcedRows = null) {
@@ -785,6 +922,8 @@ function renderControls() {
     button.setAttribute("aria-pressed", String(enabled && value === getFrontSide()));
   });
 
+  els.mixButton.hidden = state.layoutMode !== "pack";
+  els.randomiseButton.disabled = state.photos.length < 2;
   els.gapValue.textContent = `${formatMm(state.gapMm)} mm`;
   els.marginValue.textContent = `${formatMm(state.marginMm)} mm`;
 }
@@ -1090,6 +1229,30 @@ function setLayoutMode(value) {
   render();
 }
 
+function mixPackedLayout() {
+  state.layoutMode = "pack";
+  state.packSeed += 1;
+  render();
+}
+
+function randomisePhotos() {
+  syncSlots();
+  const filledSlots = state.slots
+    .map((photoId, index) => ({ photoId, index }))
+    .filter((slot) => slot.photoId !== null);
+
+  if (filledSlots.length < 2) {
+    return;
+  }
+
+  const random = createRandom(Date.now() + filledSlots.length * 131);
+  const shuffledPhotoIds = shuffleArray(filledSlots.map((slot) => slot.photoId), random);
+  filledSlots.forEach((slot, index) => {
+    state.slots[slot.index] = shuffledPhotoIds[index];
+  });
+  render();
+}
+
 document.querySelector("[data-control='orientation']").addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button) return;
@@ -1117,6 +1280,9 @@ els.marginRange.addEventListener("input", () => {
   state.marginMm = Number(els.marginRange.value);
   render();
 });
+
+els.mixButton.addEventListener("click", mixPackedLayout);
+els.randomiseButton.addEventListener("click", randomisePhotos);
 
 els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", async () => {

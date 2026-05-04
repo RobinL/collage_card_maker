@@ -152,6 +152,17 @@ button {
   padding: 0 12px;
 }
 
+.tool-button {
+  align-self: end;
+  background: #ffffff;
+  color: #1f6f78;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .icon-button {
   width: 30px;
   height: 30px;
