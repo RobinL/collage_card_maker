@@ -13,6 +13,8 @@ const state = {
   },
   layoutMode: "auto",
   packSeed: 1,
+  customSizing: new Map(),
+  activeResize: null,
   gapMm: 3,
   marginMm: 4,
   photos: [],
@@ -63,6 +65,7 @@ app.innerHTML = `
           <button type="button" data-value="wide" aria-pressed="false">Wide</button>
           <button type="button" data-value="quilt" aria-pressed="false">Quilt</button>
           <button type="button" data-value="pack" aria-pressed="false">Pack</button>
+          <button type="button" data-value="custom" aria-pressed="false">Custom</button>
         </div>
       </div>
 
@@ -238,6 +241,12 @@ function syncSlots() {
   if (state.slots.length > slotCount) {
     state.slots.length = slotCount;
   }
+
+  for (const index of state.customSizing.keys()) {
+    if (index >= slotCount) {
+      state.customSizing.delete(index);
+    }
+  }
 }
 
 function preferredAspect(photo, index) {
@@ -310,10 +319,135 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
   if (state.layoutMode === "pack") {
     return layoutPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
   }
+  if (state.layoutMode === "custom") {
+    return layoutCustomPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+  }
   return layoutAuto(slotCount, panelWidth, panelHeight, gap, margin, aspects);
 }
 
-function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
+function layoutCustomPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
+  const activeIndex = state.activeResize?.slotIndex;
+  const pinned = activeIndex !== undefined ? state.customSizing.get(activeIndex) : null;
+
+  if (!pinned?.rect) {
+    return layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, true);
+  }
+
+  const random = createRandom(state.packSeed + count * 97 + (state.orientation === "portrait" ? 17 : 0));
+  const pinnedCell = getPinnedCell(activeIndex, pinned.rect, panelWidth, panelHeight, margin);
+  const cells = [pinnedCell];
+  const remainingItems = aspects
+    .map((aspect, index) => ({
+      index,
+      ...getPackedItemShape(index, aspect, random, true),
+    }))
+    .filter((item) => item.index !== activeIndex);
+
+  shuffleArray(remainingItems, random);
+
+  const regions = getRegionsAroundPinnedCell(
+    {
+      x: margin,
+      y: margin,
+      width: Math.max(1, panelWidth - margin * 2),
+      height: Math.max(1, panelHeight - margin * 2),
+    },
+    pinnedCell,
+    gap,
+  );
+
+  cells.push(...packItemsIntoRegions(remainingItems, regions, gap, random));
+  return cells
+    .filter((cell) => cell.width > 1 && cell.height > 1)
+    .sort((a, b) => a.index - b.index);
+}
+
+function getPinnedCell(index, rect, panelWidth, panelHeight, margin) {
+  const minWidth = panelWidth * 0.06;
+  const minHeight = panelHeight * 0.06;
+  const desiredX = rect.xRatio * panelWidth;
+  const desiredY = rect.yRatio * panelHeight;
+  const width = clamp(rect.widthRatio * panelWidth, minWidth, panelWidth - desiredX);
+  const height = clamp(rect.heightRatio * panelHeight, minHeight, panelHeight - desiredY);
+  return {
+    index,
+    x: clamp(desiredX, 0, panelWidth - width),
+    y: clamp(desiredY, 0, panelHeight - height),
+    width,
+    height,
+  };
+}
+
+function getRegionsAroundPinnedCell(root, pinnedCell, gap) {
+  const rootRight = root.x + root.width;
+  const rootBottom = root.y + root.height;
+  const pinLeft = pinnedCell.x;
+  const pinTop = pinnedCell.y;
+  const pinRight = pinnedCell.x + pinnedCell.width;
+  const pinBottom = pinnedCell.y + pinnedCell.height;
+
+  return [
+    {
+      x: root.x,
+      y: root.y,
+      width: Math.max(0, pinLeft - root.x - gap),
+      height: root.height,
+    },
+    {
+      x: pinRight + gap,
+      y: root.y,
+      width: Math.max(0, rootRight - pinRight - gap),
+      height: root.height,
+    },
+    {
+      x: pinLeft,
+      y: root.y,
+      width: pinnedCell.width,
+      height: Math.max(0, pinTop - root.y - gap),
+    },
+    {
+      x: pinLeft,
+      y: pinBottom + gap,
+      width: pinnedCell.width,
+      height: Math.max(0, rootBottom - pinBottom - gap),
+    },
+  ].filter((region) => region.width > 40 && region.height > 40)
+    .sort((a, b) => b.width * b.height - a.width * a.height);
+}
+
+function packItemsIntoRegions(items, regions, gap, random) {
+  if (!items.length || !regions.length) {
+    return [];
+  }
+
+  const totalArea = regions.reduce((sum, region) => sum + region.width * region.height, 0);
+  const cells = [];
+  let cursor = 0;
+
+  regions.forEach((region, regionIndex) => {
+    const remainingItems = items.length - cursor;
+    if (remainingItems <= 0) return;
+
+    const remainingRegions = regions.length - regionIndex;
+    const idealCount = Math.round(items.length * (region.width * region.height / totalArea));
+    const count = regionIndex === regions.length - 1
+      ? remainingItems
+      : clamp(idealCount, 1, remainingItems - Math.max(0, remainingRegions - 1));
+    const group = items.slice(cursor, cursor + count);
+    cursor += count;
+
+    cells.push(...packItemsIntoRect(group, region, gap, random));
+  });
+
+  if (cursor < items.length) {
+    const biggestRegion = regions[0];
+    cells.push(...packItemsIntoRect(items.slice(cursor), biggestRegion, gap, random));
+  }
+
+  return cells;
+}
+
+function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, useCustomSizing = false) {
   const innerWidth = Math.max(1, panelWidth - margin * 2);
   const innerHeight = Math.max(1, panelHeight - margin * 2);
   if (count <= 1) {
@@ -323,7 +457,7 @@ function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
   const random = createRandom(state.packSeed + count * 97 + (state.orientation === "portrait" ? 17 : 0));
   const items = aspects.map((aspect, index) => ({
     index,
-    aspect: clamp(aspect * (0.82 + random() * 0.36), 0.45, 2.4),
+    ...getPackedItemShape(index, aspect, random, useCustomSizing),
   }));
 
   shuffleArray(items, random);
@@ -336,6 +470,21 @@ function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
   }, gap, random)
     .filter((cell) => cell.width > 1 && cell.height > 1)
     .sort((a, b) => a.index - b.index);
+}
+
+function getPackedItemShape(index, aspect, random, useCustomSizing) {
+  const custom = useCustomSizing ? state.customSizing.get(index) : null;
+  if (custom) {
+    return {
+      aspect: clamp(custom.aspect, 0.28, 3.8),
+      weight: clamp(custom.weight, 0.25, 6),
+    };
+  }
+
+  return {
+    aspect: clamp(aspect * (0.82 + random() * 0.36), 0.45, 2.4),
+    weight: 1,
+  };
 }
 
 function packItemsIntoRect(items, rect, gap, random) {
@@ -387,13 +536,14 @@ function groupAspect(items) {
   if (items.length === 1) {
     return items[0].aspect;
   }
-  const average = items.reduce((sum, item) => sum + item.aspect, 0) / items.length;
+  const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+  const average = items.reduce((sum, item) => sum + item.aspect * item.weight, 0) / totalWeight;
   return clamp(average, 0.62, 1.8);
 }
 
 function splitGroupRect(rect, firstItems, secondItems, orientation, gap) {
-  const firstWeight = groupWeight(firstItems);
-  const secondWeight = groupWeight(secondItems);
+  const firstWeight = orientation === "vertical" ? groupWidthWeight(firstItems) : groupHeightWeight(firstItems);
+  const secondWeight = orientation === "vertical" ? groupWidthWeight(secondItems) : groupHeightWeight(secondItems);
 
   if (orientation === "vertical") {
     const usableWidth = Math.max(1, rect.width - gap);
@@ -412,8 +562,12 @@ function splitGroupRect(rect, firstItems, secondItems, orientation, gap) {
   ];
 }
 
-function groupWeight(items) {
-  return items.reduce((sum, item) => sum + Math.sqrt(item.aspect), 0);
+function groupWidthWeight(items) {
+  return items.reduce((sum, item) => sum + Math.sqrt(item.aspect) * item.weight, 0);
+}
+
+function groupHeightWeight(items) {
+  return items.reduce((sum, item) => sum + (1 / Math.sqrt(item.aspect)) * item.weight, 0);
 }
 
 function layoutAuto(count, panelWidth, panelHeight, gap, margin, aspects, forcedRows = null) {
@@ -922,7 +1076,7 @@ function renderControls() {
     button.setAttribute("aria-pressed", String(enabled && value === getFrontSide()));
   });
 
-  els.mixButton.hidden = state.layoutMode !== "pack";
+  els.mixButton.hidden = state.layoutMode !== "pack" && state.layoutMode !== "custom";
   els.randomiseButton.disabled = state.photos.length < 2;
   els.gapValue.textContent = `${formatMm(state.gapMm)} mm`;
   els.marginValue.textContent = `${formatMm(state.marginMm)} mm`;
@@ -1024,6 +1178,10 @@ function renderSheet() {
     }
 
     attachSlotDrop(slot);
+    if (state.layoutMode === "custom") {
+      slot.classList.add("is-custom");
+      attachCustomResize(slot, cell.index);
+    }
     els.frontPanel.append(slot);
   }
 
@@ -1104,6 +1262,95 @@ function attachImageEditing(slot, photo) {
 
   slot.addEventListener("pointerup", endPan);
   slot.addEventListener("pointercancel", endPan);
+}
+
+function attachCustomResize(slot, slotIndex) {
+  const handles = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
+
+  for (const handle of handles) {
+    const control = document.createElement("button");
+    control.type = "button";
+    control.className = `resize-handle resize-${handle}`;
+    control.dataset.handle = handle;
+    control.setAttribute("aria-label", `Resize ${handle} edge`);
+    control.addEventListener("pointerdown", (event) => startCustomResize(event, slot, slotIndex, handle));
+    slot.append(control);
+  }
+}
+
+function startCustomResize(event, slot, slotIndex, handle) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const slotRect = slot.getBoundingClientRect();
+  const panelRect = els.frontPanel.getBoundingClientRect();
+  const startPanelX = slotRect.left - panelRect.left;
+  const startPanelY = slotRect.top - panelRect.top;
+  state.activeResize = {
+    slotIndex,
+    handle,
+    startX: event.clientX,
+    startY: event.clientY,
+    startPanelX,
+    startPanelY,
+    startWidth: slotRect.width,
+    startHeight: slotRect.height,
+    panelWidth: panelRect.width,
+    panelHeight: panelRect.height,
+    averageArea: Math.max(1, (panelRect.width * panelRect.height) / getSlotCount()),
+  };
+
+  const existing = state.customSizing.get(slotIndex) ?? {};
+  state.customSizing.set(slotIndex, {
+    ...existing,
+    aspect: clamp(slotRect.width / slotRect.height, 0.28, 3.8),
+    weight: clamp((slotRect.width * slotRect.height) / state.activeResize.averageArea, 0.25, 6),
+    rect: {
+      xRatio: startPanelX / panelRect.width,
+      yRatio: startPanelY / panelRect.height,
+      widthRatio: slotRect.width / panelRect.width,
+      heightRatio: slotRect.height / panelRect.height,
+    },
+  });
+
+  document.body.classList.add("is-resizing-layout");
+}
+
+function updateCustomResize(event) {
+  if (!state.activeResize) return;
+
+  const resize = state.activeResize;
+  const dx = event.clientX - resize.startX;
+  const dy = event.clientY - resize.startY;
+  const movesEast = resize.handle.includes("e");
+  const movesWest = resize.handle.includes("w");
+  const movesSouth = resize.handle.includes("s");
+  const movesNorth = resize.handle.includes("n");
+  const widthDelta = (movesEast ? dx : 0) + (movesWest ? -dx : 0);
+  const heightDelta = (movesSouth ? dy : 0) + (movesNorth ? -dy : 0);
+  const maxWidth = Math.max(48, resize.panelWidth - resize.startPanelX - 8);
+  const maxHeight = Math.max(48, resize.panelHeight - resize.startPanelY - 8);
+  const nextWidth = clamp(resize.startWidth + widthDelta, 48, Math.min(maxWidth, resize.startWidth * 2.8));
+  const nextHeight = clamp(resize.startHeight + heightDelta, 48, Math.min(maxHeight, resize.startHeight * 2.8));
+
+  state.customSizing.set(resize.slotIndex, {
+    aspect: clamp(nextWidth / nextHeight, 0.28, 3.8),
+    weight: clamp((nextWidth * nextHeight) / resize.averageArea, 0.25, 6),
+    rect: {
+      xRatio: resize.startPanelX / resize.panelWidth,
+      yRatio: resize.startPanelY / resize.panelHeight,
+      widthRatio: nextWidth / resize.panelWidth,
+      heightRatio: nextHeight / resize.panelHeight,
+    },
+  });
+
+  renderSheet();
+}
+
+function endCustomResize() {
+  if (!state.activeResize) return;
+  state.activeResize = null;
+  document.body.classList.remove("is-resizing-layout");
 }
 
 function getPlacement(photoId) {
@@ -1230,7 +1477,9 @@ function setLayoutMode(value) {
 }
 
 function mixPackedLayout() {
-  state.layoutMode = "pack";
+  if (state.layoutMode !== "custom") {
+    state.layoutMode = "pack";
+  }
   state.packSeed += 1;
   render();
 }
@@ -1283,6 +1532,9 @@ els.marginRange.addEventListener("input", () => {
 
 els.mixButton.addEventListener("click", mixPackedLayout);
 els.randomiseButton.addEventListener("click", randomisePhotos);
+window.addEventListener("pointermove", updateCustomResize);
+window.addEventListener("pointerup", endCustomResize);
+window.addEventListener("pointercancel", endCustomResize);
 
 els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", async () => {
