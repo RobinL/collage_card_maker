@@ -58,6 +58,9 @@ app.innerHTML = `
           <button type="button" data-value="feature" aria-pressed="false">Feature</button>
           <button type="button" data-value="grid" aria-pressed="false">Grid</button>
           <button type="button" data-value="ribbon" aria-pressed="false">Ribbon</button>
+          <button type="button" data-value="tall" aria-pressed="false">Tall</button>
+          <button type="button" data-value="wide" aria-pressed="false">Wide</button>
+          <button type="button" data-value="quilt" aria-pressed="false">Quilt</button>
         </div>
       </div>
 
@@ -263,6 +266,15 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
   }
   if (state.layoutMode === "ribbon") {
     return layoutRibbon(slotCount, panelWidth, panelHeight, gap, margin);
+  }
+  if (state.layoutMode === "tall") {
+    return layoutTallMix(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+  }
+  if (state.layoutMode === "wide") {
+    return layoutWideMix(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+  }
+  if (state.layoutMode === "quilt") {
+    return layoutQuilt(slotCount, panelWidth, panelHeight, gap, margin, aspects);
   }
   return layoutAuto(slotCount, panelWidth, panelHeight, gap, margin, aspects);
 }
@@ -492,6 +504,151 @@ function layoutRibbon(count, panelWidth, panelHeight, gap, margin) {
   return cells;
 }
 
+function layoutTallMix(count, panelWidth, panelHeight, gap, margin, aspects) {
+  if (count <= 2) {
+    return layoutGrid(count, panelWidth, panelHeight, gap, margin);
+  }
+
+  const innerWidth = Math.max(1, panelWidth - margin * 2);
+  const innerHeight = Math.max(1, panelHeight - margin * 2);
+  const cells = [];
+  const sideCount = Math.min(count - 1, state.orientation === "landscape" ? 2 : 3);
+  const sideWidth = innerWidth * (state.orientation === "landscape" ? 0.42 : 0.28);
+  const mainWidth = innerWidth - sideWidth - gap;
+
+  addStackedColumn(cells, 0, sideCount, margin, margin, sideWidth, innerHeight, gap);
+  addAutoRegion(
+    cells,
+    sideCount,
+    count - sideCount,
+    margin + sideWidth + gap,
+    margin,
+    mainWidth,
+    innerHeight,
+    gap,
+    aspects,
+  );
+
+  return cleanCells(cells);
+}
+
+function layoutWideMix(count, panelWidth, panelHeight, gap, margin, aspects) {
+  if (count <= 2) {
+    return layoutGrid(count, panelWidth, panelHeight, gap, margin);
+  }
+
+  const innerWidth = Math.max(1, panelWidth - margin * 2);
+  const innerHeight = Math.max(1, panelHeight - margin * 2);
+  const cells = [];
+  const bandCount = Math.min(count - 1, state.orientation === "portrait" ? 2 : 1);
+  const bandHeight = innerHeight * (state.orientation === "portrait" ? 0.34 : 0.28);
+  const mainHeight = innerHeight - bandHeight - gap;
+
+  addSplitRow(cells, 0, bandCount, margin, margin, innerWidth, bandHeight, gap);
+  addAutoRegion(
+    cells,
+    bandCount,
+    count - bandCount,
+    margin,
+    margin + bandHeight + gap,
+    innerWidth,
+    mainHeight,
+    gap,
+    aspects,
+  );
+
+  return cleanCells(cells);
+}
+
+function layoutQuilt(count, panelWidth, panelHeight, gap, margin, aspects) {
+  if (count <= 4) {
+    return layoutFeature(count, panelWidth, panelHeight, gap, margin);
+  }
+
+  const innerWidth = Math.max(1, panelWidth - margin * 2);
+  const innerHeight = Math.max(1, panelHeight - margin * 2);
+  const cells = [];
+
+  if (state.orientation === "landscape") {
+    const topHeight = innerHeight * 0.24;
+    const centerHeight = innerHeight * 0.42;
+    const bottomHeight = innerHeight - topHeight - centerHeight - gap * 2;
+    const tallWidth = innerWidth * 0.38;
+    const centerRightWidth = innerWidth - tallWidth - gap;
+
+    addSplitRow(cells, 0, 2, margin, margin, innerWidth, topHeight, gap);
+    cells.push({
+      index: 2,
+      x: margin,
+      y: margin + topHeight + gap,
+      width: tallWidth,
+      height: centerHeight,
+    });
+    addStackedColumn(
+      cells,
+      3,
+      Math.min(2, count - 3),
+      margin + tallWidth + gap,
+      margin + topHeight + gap,
+      centerRightWidth,
+      centerHeight,
+      gap,
+    );
+    addAutoRegion(
+      cells,
+      Math.min(5, count),
+      count - Math.min(5, count),
+      margin,
+      margin + topHeight + gap + centerHeight + gap,
+      innerWidth,
+      bottomHeight,
+      gap,
+      aspects,
+    );
+  } else {
+    const leftWidth = innerWidth * 0.34;
+    const rightWidth = innerWidth - leftWidth - gap;
+    const topHeight = innerHeight * 0.34;
+    const lowerHeight = innerHeight - topHeight - gap;
+
+    addStackedColumn(cells, 0, 2, margin, margin, leftWidth, innerHeight, gap);
+    addSplitRow(cells, 2, Math.min(2, count - 2), margin + leftWidth + gap, margin, rightWidth, topHeight, gap);
+    addAutoRegion(
+      cells,
+      Math.min(4, count),
+      count - Math.min(4, count),
+      margin + leftWidth + gap,
+      margin + topHeight + gap,
+      rightWidth,
+      lowerHeight,
+      gap,
+      aspects,
+    );
+  }
+
+  return cleanCells(cells);
+}
+
+function addAutoRegion(cells, startIndex, count, x, y, width, height, gap, aspects) {
+  if (count <= 0 || width <= 0 || height <= 0) return;
+
+  const generated = layoutAuto(count, width, height, gap, 0, aspects.slice(startIndex, startIndex + count));
+  for (const cell of generated) {
+    cells.push({
+      ...cell,
+      index: startIndex + cell.index,
+      x: x + cell.x,
+      y: y + cell.y,
+    });
+  }
+}
+
+function cleanCells(cells) {
+  return cells
+    .filter((cell) => cell.width > 0 && cell.height > 0)
+    .sort((a, b) => a.index - b.index);
+}
+
 function addStackedColumn(cells, startIndex, count, x, y, width, height, gap) {
   if (count <= 0) return;
   const cellHeight = (height - gap * (count - 1)) / count;
@@ -529,19 +686,25 @@ async function addFiles(fileList, targetSlot = null) {
   loaded.forEach((photo) => {
     state.placements.set(photo.id, { zoom: 1, focusX: 0.5, focusY: 0.5 });
   });
-  syncSlots();
 
   if (targetSlot !== null && loaded[0]) {
-    assignPhotoToSlot(loaded[0].id, targetSlot, false);
+    while (state.slots.length < getSlotCount()) {
+      state.slots.push(null);
+    }
+
+    placePhotoInSlot(loaded[0].id, targetSlot);
     loaded.slice(1).forEach((photo) => {
       const emptyIndex = state.slots.findIndex((id) => id === null);
       if (emptyIndex >= 0) {
-        assignPhotoToSlot(photo.id, emptyIndex, false);
+        placePhotoInSlot(photo.id, emptyIndex);
       }
     });
+    syncSlots();
+    render();
     return;
   }
 
+  syncSlots();
   render();
 }
 
@@ -569,6 +732,14 @@ function loadPhoto(file) {
 
 function assignPhotoToSlot(photoId, slotIndex, rerender = true) {
   syncSlots();
+  placePhotoInSlot(photoId, slotIndex);
+
+  if (rerender) {
+    render();
+  }
+}
+
+function placePhotoInSlot(photoId, slotIndex) {
   const existingIndex = state.slots.indexOf(photoId);
   const targetPhotoId = state.slots[slotIndex] ?? null;
 
@@ -577,10 +748,6 @@ function assignPhotoToSlot(photoId, slotIndex, rerender = true) {
   }
 
   state.slots[slotIndex] = photoId;
-
-  if (rerender) {
-    render();
-  }
 }
 
 function removePhoto(photoId) {
