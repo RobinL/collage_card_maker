@@ -13,8 +13,11 @@ const state = {
   },
   layoutMode: "auto",
   packSeed: 1,
-  customSizing: new Map(),
   activeResize: null,
+  recursiveTree: { type: "leaf", id: "pane-1" },
+  activeRecursiveId: "pane-1",
+  nextRecursivePaneId: 2,
+  nextRecursiveSplitId: 1,
   gapMm: 3,
   marginMm: 4,
   photos: [],
@@ -51,6 +54,7 @@ app.innerHTML = `
           <button type="button" data-value="right" aria-pressed="true">Right</button>
           <button type="button" data-value="top" aria-pressed="false">Top</button>
           <button type="button" data-value="bottom" aria-pressed="false">Bottom</button>
+          <button type="button" data-value="full" aria-pressed="false">Full page</button>
         </div>
       </div>
 
@@ -65,7 +69,7 @@ app.innerHTML = `
           <button type="button" data-value="wide" aria-pressed="false">Wide</button>
           <button type="button" data-value="quilt" aria-pressed="false">Quilt</button>
           <button type="button" data-value="pack" aria-pressed="false">Pack</button>
-          <button type="button" data-value="custom" aria-pressed="false">Custom</button>
+          <button type="button" data-value="recursive" aria-pressed="false">Recursive</button>
         </div>
       </div>
 
@@ -147,11 +151,28 @@ function getFrontSide() {
   return state.frontByOrientation[state.orientation];
 }
 
+function isFullPage() {
+  return getFrontSide() === "full";
+}
+
 function getSheetMetrics(width = DEFAULT_PREVIEW_WIDTH) {
   const landscape = state.orientation === "landscape";
   const aspect = landscape ? A4_MM.height / A4_MM.width : A4_MM.width / A4_MM.height;
   const sheetWidth = width;
   const sheetHeight = Math.round(sheetWidth / aspect);
+
+  if (isFullPage()) {
+    return {
+      sheetWidth,
+      sheetHeight,
+      front: {
+        x: 0,
+        y: 0,
+        width: sheetWidth,
+        height: sheetHeight,
+      },
+    };
+  }
 
   if (landscape) {
     return {
@@ -198,6 +219,15 @@ function getExportSize() {
 }
 
 function getExportFrontRect(width, height) {
+  if (isFullPage()) {
+    return {
+      x: 0,
+      y: 0,
+      width,
+      height,
+    };
+  }
+
   if (state.orientation === "landscape") {
     return {
       x: getFrontSide() === "right" ? width / 2 : 0,
@@ -216,36 +246,41 @@ function getExportFrontRect(width, height) {
 }
 
 function getSlotCount() {
+  if (state.layoutMode === "recursive") {
+    return getRecursiveLeaves().length;
+  }
   return Math.max(state.photos.length, 5);
 }
 
 function syncSlots() {
+  const slotCount = getSlotCount();
   const validIds = new Set(state.photos.map((photo) => photo.id));
-  state.slots = state.slots.filter((id) => id === null || validIds.has(id));
+  state.slots = state.slots.filter((id) => id === null || validIds.has(id)).slice(0, slotCount);
+
+  while (state.slots.length < slotCount) {
+    state.slots.push(null);
+  }
+
+  if (state.layoutMode === "recursive") {
+    return;
+  }
 
   for (const photo of state.photos) {
     if (!state.slots.includes(photo.id)) {
       const emptyIndex = state.slots.indexOf(null);
       if (emptyIndex >= 0) {
         state.slots[emptyIndex] = photo.id;
-      } else {
+      } else if (state.layoutMode !== "recursive") {
         state.slots.push(photo.id);
       }
     }
   }
 
-  const slotCount = getSlotCount();
   while (state.slots.length < slotCount) {
     state.slots.push(null);
   }
   if (state.slots.length > slotCount) {
     state.slots.length = slotCount;
-  }
-
-  for (const index of state.customSizing.keys()) {
-    if (index >= slotCount) {
-      state.customSizing.delete(index);
-    }
   }
 }
 
@@ -293,11 +328,114 @@ function shuffleArray(items, random = Math.random) {
   return items;
 }
 
+function createRecursiveLeaf() {
+  const leaf = { type: "leaf", id: `pane-${state.nextRecursivePaneId}` };
+  state.nextRecursivePaneId += 1;
+  return leaf;
+}
+
+function createRecursiveSplit(orientation, first, second) {
+  const split = {
+    type: "split",
+    id: `split-${state.nextRecursiveSplitId}`,
+    orientation,
+    ratio: 0.5,
+    first,
+    second,
+  };
+  state.nextRecursiveSplitId += 1;
+  return split;
+}
+
+function getRecursiveLeaves(node = state.recursiveTree, leaves = []) {
+  if (node.type === "leaf") {
+    leaves.push(node);
+    return leaves;
+  }
+
+  getRecursiveLeaves(node.first, leaves);
+  getRecursiveLeaves(node.second, leaves);
+  return leaves;
+}
+
+function getRecursiveLeafIndex(leafId) {
+  return getRecursiveLeaves().findIndex((leaf) => leaf.id === leafId);
+}
+
+function getFirstRecursiveLeaf(node) {
+  return node.type === "leaf" ? node : getFirstRecursiveLeaf(node.first);
+}
+
+function findRecursiveLeaf(leafId, node = state.recursiveTree, parent = null, side = null) {
+  if (node.type === "leaf") {
+    return node.id === leafId ? { node, parent, side } : null;
+  }
+
+  return findRecursiveLeaf(leafId, node.first, node, "first")
+    ?? findRecursiveLeaf(leafId, node.second, node, "second");
+}
+
+function findRecursiveSplit(splitId, node = state.recursiveTree) {
+  return findRecursiveSplitTarget(splitId, node)?.node ?? null;
+}
+
+function findRecursiveSplitTarget(splitId, node = state.recursiveTree, parent = null, side = null) {
+  if (node.type === "leaf") {
+    return null;
+  }
+  if (node.id === splitId) {
+    return { node, parent, side };
+  }
+  return findRecursiveSplitTarget(splitId, node.first, node, "first")
+    ?? findRecursiveSplitTarget(splitId, node.second, node, "second");
+}
+
+function replaceRecursiveNode(target, replacement) {
+  if (!target.parent) {
+    state.recursiveTree = replacement;
+    return;
+  }
+  target.parent[target.side] = replacement;
+}
+
+function splitRecursivePane(direction) {
+  const target = findRecursiveLeaf(state.activeRecursiveId);
+  if (!target) return;
+
+  const currentIndex = getRecursiveLeafIndex(state.activeRecursiveId);
+  const newLeaf = createRecursiveLeaf();
+  const orientation = direction === "left" || direction === "right" ? "vertical" : "horizontal";
+  const originalFirst = direction === "right" || direction === "down";
+  const split = originalFirst
+    ? createRecursiveSplit(orientation, target.node, newLeaf)
+    : createRecursiveSplit(orientation, newLeaf, target.node);
+
+  replaceRecursiveNode(target, split);
+  state.slots.splice(originalFirst ? currentIndex + 1 : currentIndex, 0, null);
+  state.activeRecursiveId = newLeaf.id;
+  render();
+}
+
+function closeRecursivePane() {
+  const target = findRecursiveLeaf(state.activeRecursiveId);
+  if (!target?.parent) return;
+
+  const closingIndex = getRecursiveLeafIndex(state.activeRecursiveId);
+  const sibling = target.side === "first" ? target.parent.second : target.parent.first;
+  replaceRecursiveNode(findRecursiveSplitTarget(target.parent.id), sibling);
+  state.slots.splice(closingIndex, 1);
+  state.activeRecursiveId = getFirstRecursiveLeaf(sibling).id;
+  render();
+}
+
 function buildCells(panelWidth, panelHeight, gap, margin) {
   syncSlots();
   const slotCount = getSlotCount();
   const aspects = getSlotAspects(slotCount);
 
+  if (state.layoutMode === "recursive") {
+    return layoutRecursive(panelWidth, panelHeight, gap, margin).cells;
+  }
   if (state.layoutMode === "feature") {
     return layoutFeature(slotCount, panelWidth, panelHeight, gap, margin);
   }
@@ -319,135 +457,73 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
   if (state.layoutMode === "pack") {
     return layoutPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
   }
-  if (state.layoutMode === "custom") {
-    return layoutCustomPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
-  }
   return layoutAuto(slotCount, panelWidth, panelHeight, gap, margin, aspects);
 }
 
-function layoutCustomPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
-  const activeIndex = state.activeResize?.slotIndex;
-  const pinned = activeIndex !== undefined ? state.customSizing.get(activeIndex) : null;
-
-  if (!pinned?.rect) {
-    return layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, true);
-  }
-
-  const random = createRandom(state.packSeed + count * 97 + (state.orientation === "portrait" ? 17 : 0));
-  const pinnedCell = getPinnedCell(activeIndex, pinned.rect, panelWidth, panelHeight, margin);
-  const cells = [pinnedCell];
-  const remainingItems = aspects
-    .map((aspect, index) => ({
-      index,
-      ...getPackedItemShape(index, aspect, random, true),
-    }))
-    .filter((item) => item.index !== activeIndex);
-
-  shuffleArray(remainingItems, random);
-
-  const regions = getRegionsAroundPinnedCell(
-    {
-      x: margin,
-      y: margin,
-      width: Math.max(1, panelWidth - margin * 2),
-      height: Math.max(1, panelHeight - margin * 2),
-    },
-    pinnedCell,
-    gap,
-  );
-
-  cells.push(...packItemsIntoRegions(remainingItems, regions, gap, random));
-  return cells
-    .filter((cell) => cell.width > 1 && cell.height > 1)
-    .sort((a, b) => a.index - b.index);
-}
-
-function getPinnedCell(index, rect, panelWidth, panelHeight, margin) {
-  const minWidth = panelWidth * 0.06;
-  const minHeight = panelHeight * 0.06;
-  const desiredX = rect.xRatio * panelWidth;
-  const desiredY = rect.yRatio * panelHeight;
-  const width = clamp(rect.widthRatio * panelWidth, minWidth, panelWidth - desiredX);
-  const height = clamp(rect.heightRatio * panelHeight, minHeight, panelHeight - desiredY);
-  return {
-    index,
-    x: clamp(desiredX, 0, panelWidth - width),
-    y: clamp(desiredY, 0, panelHeight - height),
-    width,
-    height,
-  };
-}
-
-function getRegionsAroundPinnedCell(root, pinnedCell, gap) {
-  const rootRight = root.x + root.width;
-  const rootBottom = root.y + root.height;
-  const pinLeft = pinnedCell.x;
-  const pinTop = pinnedCell.y;
-  const pinRight = pinnedCell.x + pinnedCell.width;
-  const pinBottom = pinnedCell.y + pinnedCell.height;
-
-  return [
-    {
-      x: root.x,
-      y: root.y,
-      width: Math.max(0, pinLeft - root.x - gap),
-      height: root.height,
-    },
-    {
-      x: pinRight + gap,
-      y: root.y,
-      width: Math.max(0, rootRight - pinRight - gap),
-      height: root.height,
-    },
-    {
-      x: pinLeft,
-      y: root.y,
-      width: pinnedCell.width,
-      height: Math.max(0, pinTop - root.y - gap),
-    },
-    {
-      x: pinLeft,
-      y: pinBottom + gap,
-      width: pinnedCell.width,
-      height: Math.max(0, rootBottom - pinBottom - gap),
-    },
-  ].filter((region) => region.width > 40 && region.height > 40)
-    .sort((a, b) => b.width * b.height - a.width * a.height);
-}
-
-function packItemsIntoRegions(items, regions, gap, random) {
-  if (!items.length || !regions.length) {
-    return [];
-  }
-
-  const totalArea = regions.reduce((sum, region) => sum + region.width * region.height, 0);
+function layoutRecursive(panelWidth, panelHeight, gap, margin) {
   const cells = [];
-  let cursor = 0;
+  const dividers = [];
+  const root = {
+    x: margin,
+    y: margin,
+    width: Math.max(1, panelWidth - margin * 2),
+    height: Math.max(1, panelHeight - margin * 2),
+  };
+  let leafIndex = 0;
 
-  regions.forEach((region, regionIndex) => {
-    const remainingItems = items.length - cursor;
-    if (remainingItems <= 0) return;
+  function walk(node, rect) {
+    if (node.type === "leaf") {
+      cells.push({ index: leafIndex, nodeId: node.id, ...rect });
+      leafIndex += 1;
+      return;
+    }
 
-    const remainingRegions = regions.length - regionIndex;
-    const idealCount = Math.round(items.length * (region.width * region.height / totalArea));
-    const count = regionIndex === regions.length - 1
-      ? remainingItems
-      : clamp(idealCount, 1, remainingItems - Math.max(0, remainingRegions - 1));
-    const group = items.slice(cursor, cursor + count);
-    cursor += count;
+    const ratio = clamp(node.ratio, 0.05, 0.95);
+    node.ratio = ratio;
 
-    cells.push(...packItemsIntoRect(group, region, gap, random));
-  });
+    if (node.orientation === "vertical") {
+      const usableWidth = Math.max(1, rect.width - gap);
+      const firstWidth = usableWidth * ratio;
+      const secondWidth = usableWidth - firstWidth;
+      const firstRect = { x: rect.x, y: rect.y, width: firstWidth, height: rect.height };
+      const secondRect = { x: rect.x + firstWidth + gap, y: rect.y, width: secondWidth, height: rect.height };
+      dividers.push({
+        id: node.id,
+        orientation: node.orientation,
+        x: rect.x + firstWidth + gap / 2,
+        y: rect.y,
+        width: 0,
+        height: rect.height,
+        usableSize: usableWidth,
+      });
+      walk(node.first, firstRect);
+      walk(node.second, secondRect);
+      return;
+    }
 
-  if (cursor < items.length) {
-    const biggestRegion = regions[0];
-    cells.push(...packItemsIntoRect(items.slice(cursor), biggestRegion, gap, random));
+    const usableHeight = Math.max(1, rect.height - gap);
+    const firstHeight = usableHeight * ratio;
+    const secondHeight = usableHeight - firstHeight;
+    const firstRect = { x: rect.x, y: rect.y, width: rect.width, height: firstHeight };
+    const secondRect = { x: rect.x, y: rect.y + firstHeight + gap, width: rect.width, height: secondHeight };
+    dividers.push({
+      id: node.id,
+      orientation: node.orientation,
+      x: rect.x,
+      y: rect.y + firstHeight + gap / 2,
+      width: rect.width,
+      height: 0,
+      usableSize: usableHeight,
+    });
+    walk(node.first, firstRect);
+    walk(node.second, secondRect);
   }
 
-  return cells;
+  walk(state.recursiveTree, root);
+  return { cells, dividers };
 }
 
-function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, useCustomSizing = false) {
+function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
   const innerWidth = Math.max(1, panelWidth - margin * 2);
   const innerHeight = Math.max(1, panelHeight - margin * 2);
   if (count <= 1) {
@@ -457,7 +533,7 @@ function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, useC
   const random = createRandom(state.packSeed + count * 97 + (state.orientation === "portrait" ? 17 : 0));
   const items = aspects.map((aspect, index) => ({
     index,
-    ...getPackedItemShape(index, aspect, random, useCustomSizing),
+    ...getPackedItemShape(aspect, random),
   }));
 
   shuffleArray(items, random);
@@ -472,15 +548,7 @@ function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects, useC
     .sort((a, b) => a.index - b.index);
 }
 
-function getPackedItemShape(index, aspect, random, useCustomSizing) {
-  const custom = useCustomSizing ? state.customSizing.get(index) : null;
-  if (custom) {
-    return {
-      aspect: clamp(custom.aspect, 0.28, 3.8),
-      weight: clamp(custom.weight, 0.25, 6),
-    };
-  }
-
+function getPackedItemShape(aspect, random) {
   return {
     aspect: clamp(aspect * (0.82 + random() * 0.36), 0.45, 2.4),
     weight: 1,
@@ -978,6 +1046,26 @@ async function addFiles(fileList, targetSlot = null) {
     state.placements.set(photo.id, { zoom: 1, focusX: 0.5, focusY: 0.5 });
   });
 
+  if (state.layoutMode === "recursive") {
+    syncSlots();
+    if (targetSlot !== null) {
+      placePhotoInSlot(loaded[0].id, targetSlot);
+      for (const photo of loaded.slice(1)) {
+        const emptyIndex = state.slots.indexOf(null);
+        if (emptyIndex < 0) break;
+        placePhotoInSlot(photo.id, emptyIndex);
+      }
+    } else {
+      for (const photo of loaded) {
+        const emptyIndex = state.slots.indexOf(null);
+        if (emptyIndex < 0) break;
+        placePhotoInSlot(photo.id, emptyIndex);
+      }
+    }
+    render();
+    return;
+  }
+
   if (targetSlot !== null && loaded[0]) {
     while (state.slots.length < getSlotCount()) {
       state.slots.push(null);
@@ -1071,12 +1159,13 @@ function renderControls() {
 
   document.querySelectorAll("[data-control='front'] button").forEach((button) => {
     const value = button.dataset.value;
-    const enabled = state.orientation === "landscape" ? value === "left" || value === "right" : value === "top" || value === "bottom";
+    const enabled = value === "full"
+      || (state.orientation === "landscape" ? value === "left" || value === "right" : value === "top" || value === "bottom");
     button.hidden = !enabled;
     button.setAttribute("aria-pressed", String(enabled && value === getFrontSide()));
   });
 
-  els.mixButton.hidden = state.layoutMode !== "pack" && state.layoutMode !== "custom";
+  els.mixButton.hidden = state.layoutMode !== "pack";
   els.randomiseButton.disabled = state.photos.length < 2;
   els.gapValue.textContent = `${formatMm(state.gapMm)} mm`;
   els.marginValue.textContent = `${formatMm(state.marginMm)} mm`;
@@ -1142,7 +1231,10 @@ function renderSheet() {
   const front = metrics.front;
   const gap = mmToPreviewPx(state.gapMm);
   const margin = mmToPreviewPx(state.marginMm);
-  const cells = buildCells(front.width, front.height, gap, margin);
+  const recursiveLayout = state.layoutMode === "recursive"
+    ? layoutRecursive(front.width, front.height, gap, margin)
+    : null;
+  const cells = recursiveLayout?.cells ?? buildCells(front.width, front.height, gap, margin);
 
   els.sheet.className = `sheet ${state.orientation} front-${getFrontSide()}`;
   els.frontPanel.style.left = `${(front.x / metrics.sheetWidth) * 100}%`;
@@ -1156,10 +1248,26 @@ function renderSheet() {
     const slot = document.createElement("div");
     slot.className = "slot";
     slot.dataset.slotIndex = String(cell.index);
+    if (cell.nodeId) {
+      slot.dataset.nodeId = cell.nodeId;
+    }
     slot.style.left = `${(cell.x / front.width) * 100}%`;
     slot.style.top = `${(cell.y / front.height) * 100}%`;
     slot.style.width = `${(cell.width / front.width) * 100}%`;
     slot.style.height = `${(cell.height / front.height) * 100}%`;
+
+    if (state.layoutMode === "recursive") {
+      slot.classList.add("is-recursive");
+      if (cell.nodeId === state.activeRecursiveId) {
+        slot.classList.add("is-active-recursive");
+        renderRecursivePaneControls(slot, cell.nodeId);
+      }
+      slot.addEventListener("pointerdown", (event) => {
+        if (event.target.closest(".recursive-pane-controls")) return;
+        state.activeRecursiveId = cell.nodeId;
+        renderSheet();
+      }, { capture: true });
+    }
 
     const photo = getPhoto(state.slots[cell.index]);
     if (photo) {
@@ -1178,14 +1286,91 @@ function renderSheet() {
     }
 
     attachSlotDrop(slot);
-    if (state.layoutMode === "custom") {
-      slot.classList.add("is-custom");
-      attachCustomResize(slot, cell.index);
-    }
     els.frontPanel.append(slot);
   }
 
+  if (recursiveLayout) {
+    renderRecursiveDividers(recursiveLayout.dividers, front);
+  }
+
   requestAnimationFrame(positionImages);
+}
+
+function renderRecursivePaneControls(slot, nodeId) {
+  const controls = document.createElement("div");
+  controls.className = "recursive-pane-controls";
+  controls.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  controls.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  const splitPad = document.createElement("div");
+  splitPad.className = "recursive-split-pad";
+  const splitControls = [
+    ["up", "Split pane up", "&uarr;"],
+    ["left", "Split pane left", "&larr;"],
+    ["right", "Split pane right", "&rarr;"],
+    ["down", "Split pane down", "&darr;"],
+  ];
+
+  for (const [direction, label, symbol] of splitControls) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `recursive-pane-button split-${direction}`;
+    button.dataset.recursiveSplit = direction;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.innerHTML = symbol;
+    button.addEventListener("click", () => {
+      state.activeRecursiveId = nodeId;
+      splitRecursivePane(direction);
+    });
+    splitPad.append(button);
+  }
+
+  controls.append(splitPad);
+
+  if (getRecursiveLeaves().length > 1) {
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "recursive-pane-button recursive-close-button destructive-icon";
+    closeButton.setAttribute("aria-label", "Close pane");
+    closeButton.title = "Close pane";
+    closeButton.innerHTML = "&times;";
+    closeButton.addEventListener("click", () => {
+      state.activeRecursiveId = nodeId;
+      closeRecursivePane();
+    });
+    controls.append(closeButton);
+  }
+
+  slot.append(controls);
+}
+
+function renderRecursiveDividers(dividers, front) {
+  for (const divider of dividers) {
+    const control = document.createElement("button");
+    control.type = "button";
+    control.className = `recursive-divider recursive-divider-${divider.orientation}`;
+    control.dataset.splitId = divider.id;
+    control.dataset.usableSize = String(divider.usableSize);
+    control.setAttribute("aria-label", "Resize split");
+    control.addEventListener("pointerdown", startRecursiveResize);
+
+    if (divider.orientation === "vertical") {
+      control.style.left = `${(divider.x / front.width) * 100}%`;
+      control.style.top = `${(divider.y / front.height) * 100}%`;
+      control.style.height = `${(divider.height / front.height) * 100}%`;
+    } else {
+      control.style.left = `${(divider.x / front.width) * 100}%`;
+      control.style.top = `${(divider.y / front.height) * 100}%`;
+      control.style.width = `${(divider.width / front.width) * 100}%`;
+    }
+
+    els.frontPanel.append(control);
+  }
 }
 
 function attachSlotDrop(slot) {
@@ -1264,93 +1449,53 @@ function attachImageEditing(slot, photo) {
   slot.addEventListener("pointercancel", endPan);
 }
 
-function attachCustomResize(slot, slotIndex) {
-  const handles = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
-
-  for (const handle of handles) {
-    const control = document.createElement("button");
-    control.type = "button";
-    control.className = `resize-handle resize-${handle}`;
-    control.dataset.handle = handle;
-    control.setAttribute("aria-label", `Resize ${handle} edge`);
-    control.addEventListener("pointerdown", (event) => startCustomResize(event, slot, slotIndex, handle));
-    slot.append(control);
-  }
-}
-
-function startCustomResize(event, slot, slotIndex, handle) {
+function startRecursiveResize(event) {
   event.preventDefault();
   event.stopPropagation();
 
-  const slotRect = slot.getBoundingClientRect();
+  const split = findRecursiveSplit(event.currentTarget.dataset.splitId);
+  if (!split) return;
+
+  const metrics = getSheetMetrics();
   const panelRect = els.frontPanel.getBoundingClientRect();
-  const startPanelX = slotRect.left - panelRect.left;
-  const startPanelY = slotRect.top - panelRect.top;
+  const front = metrics.front;
+  const scale = split.orientation === "vertical"
+    ? panelRect.width / front.width
+    : panelRect.height / front.height;
+  const usableSize = Number(event.currentTarget.dataset.usableSize) * scale;
+
   state.activeResize = {
-    slotIndex,
-    handle,
+    type: "recursive",
+    splitId: split.id,
+    orientation: split.orientation,
     startX: event.clientX,
     startY: event.clientY,
-    startPanelX,
-    startPanelY,
-    startWidth: slotRect.width,
-    startHeight: slotRect.height,
-    panelWidth: panelRect.width,
-    panelHeight: panelRect.height,
-    averageArea: Math.max(1, (panelRect.width * panelRect.height) / getSlotCount()),
+    startRatio: split.ratio,
+    usableSize,
   };
 
-  const existing = state.customSizing.get(slotIndex) ?? {};
-  state.customSizing.set(slotIndex, {
-    ...existing,
-    aspect: clamp(slotRect.width / slotRect.height, 0.28, 3.8),
-    weight: clamp((slotRect.width * slotRect.height) / state.activeResize.averageArea, 0.25, 6),
-    rect: {
-      xRatio: startPanelX / panelRect.width,
-      yRatio: startPanelY / panelRect.height,
-      widthRatio: slotRect.width / panelRect.width,
-      heightRatio: slotRect.height / panelRect.height,
-    },
-  });
-
-  document.body.classList.add("is-resizing-layout");
+  document.body.classList.add("is-resizing-recursive");
 }
 
-function updateCustomResize(event) {
-  if (!state.activeResize) return;
+function updateRecursiveResize(event) {
+  if (state.activeResize?.type !== "recursive") return;
 
   const resize = state.activeResize;
-  const dx = event.clientX - resize.startX;
-  const dy = event.clientY - resize.startY;
-  const movesEast = resize.handle.includes("e");
-  const movesWest = resize.handle.includes("w");
-  const movesSouth = resize.handle.includes("s");
-  const movesNorth = resize.handle.includes("n");
-  const widthDelta = (movesEast ? dx : 0) + (movesWest ? -dx : 0);
-  const heightDelta = (movesSouth ? dy : 0) + (movesNorth ? -dy : 0);
-  const maxWidth = Math.max(48, resize.panelWidth - resize.startPanelX - 8);
-  const maxHeight = Math.max(48, resize.panelHeight - resize.startPanelY - 8);
-  const nextWidth = clamp(resize.startWidth + widthDelta, 48, Math.min(maxWidth, resize.startWidth * 2.8));
-  const nextHeight = clamp(resize.startHeight + heightDelta, 48, Math.min(maxHeight, resize.startHeight * 2.8));
+  const split = findRecursiveSplit(resize.splitId);
+  if (!split) return;
 
-  state.customSizing.set(resize.slotIndex, {
-    aspect: clamp(nextWidth / nextHeight, 0.28, 3.8),
-    weight: clamp((nextWidth * nextHeight) / resize.averageArea, 0.25, 6),
-    rect: {
-      xRatio: resize.startPanelX / resize.panelWidth,
-      yRatio: resize.startPanelY / resize.panelHeight,
-      widthRatio: nextWidth / resize.panelWidth,
-      heightRatio: nextHeight / resize.panelHeight,
-    },
-  });
-
+  const delta = resize.orientation === "vertical"
+    ? event.clientX - resize.startX
+    : event.clientY - resize.startY;
+  const minRatio = clamp(48 / Math.max(1, resize.usableSize), 0.05, 0.45);
+  split.ratio = clamp(resize.startRatio + delta / Math.max(1, resize.usableSize), minRatio, 1 - minRatio);
   renderSheet();
 }
 
-function endCustomResize() {
-  if (!state.activeResize) return;
+function endRecursiveResize() {
+  if (state.activeResize?.type !== "recursive") return;
   state.activeResize = null;
-  document.body.classList.remove("is-resizing-layout");
+  document.body.classList.remove("is-resizing-recursive");
 }
 
 function getPlacement(photoId) {
@@ -1462,7 +1607,16 @@ function drawPhoto(ctx, photo, x, y, width, height) {
 }
 
 function setOrientation(value) {
+  const previousFrontSide = getFrontSide();
   state.orientation = value;
+  const frontSide = getFrontSide();
+  if (previousFrontSide === "full") {
+    state.frontByOrientation[value] = "full";
+  } else if (value === "landscape" && (frontSide === "top" || frontSide === "bottom")) {
+    state.frontByOrientation.landscape = "right";
+  } else if (value === "portrait" && (frontSide === "left" || frontSide === "right")) {
+    state.frontByOrientation.portrait = "bottom";
+  }
   render();
 }
 
@@ -1473,13 +1627,14 @@ function setFrontSide(value) {
 
 function setLayoutMode(value) {
   state.layoutMode = value;
+  if (value === "recursive" && getRecursiveLeafIndex(state.activeRecursiveId) < 0) {
+    state.activeRecursiveId = getFirstRecursiveLeaf(state.recursiveTree).id;
+  }
   render();
 }
 
 function mixPackedLayout() {
-  if (state.layoutMode !== "custom") {
-    state.layoutMode = "pack";
-  }
+  state.layoutMode = "pack";
   state.packSeed += 1;
   render();
 }
@@ -1532,9 +1687,15 @@ els.marginRange.addEventListener("input", () => {
 
 els.mixButton.addEventListener("click", mixPackedLayout);
 els.randomiseButton.addEventListener("click", randomisePhotos);
-window.addEventListener("pointermove", updateCustomResize);
-window.addEventListener("pointerup", endCustomResize);
-window.addEventListener("pointercancel", endCustomResize);
+window.addEventListener("pointermove", (event) => {
+  updateRecursiveResize(event);
+});
+window.addEventListener("pointerup", () => {
+  endRecursiveResize();
+});
+window.addEventListener("pointercancel", () => {
+  endRecursiveResize();
+});
 
 els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", async () => {
