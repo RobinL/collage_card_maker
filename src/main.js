@@ -1129,6 +1129,17 @@ function placePhotoInSlot(photoId, slotIndex) {
   state.slots[slotIndex] = photoId;
 }
 
+function swapSlots(sourceIndex, targetIndex) {
+  syncSlots();
+  if (sourceIndex === targetIndex) return;
+  if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex)) return;
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  if (sourceIndex >= state.slots.length || targetIndex >= state.slots.length) return;
+
+  [state.slots[sourceIndex], state.slots[targetIndex]] = [state.slots[targetIndex], state.slots[sourceIndex]];
+  render();
+}
+
 function removePhoto(photoId) {
   const photo = getPhoto(photoId);
   if (!photo) return;
@@ -1207,6 +1218,10 @@ function renderPhotoList() {
       event.dataTransfer.setData("application/x-photo-id", photo.id);
       event.dataTransfer.setData("text/plain", photo.id);
     });
+    item.addEventListener("dragend", () => {
+      state.dragPhotoId = null;
+      state.dragSlotIndex = null;
+    });
 
     item.querySelector(".remove-photo").addEventListener("click", () => removePhoto(photo.id));
     els.photoList.append(item);
@@ -1276,8 +1291,10 @@ function renderSheet() {
       image.alt = "";
       image.dataset.photoId = photo.id;
       slot.classList.add("is-filled");
+      slot.draggable = true;
       slot.append(image);
       attachImageEditing(slot, photo);
+      attachSlotDrag(slot, photo);
     } else {
       slot.classList.add("is-empty");
       const mark = document.createElement("span");
@@ -1377,7 +1394,7 @@ function attachSlotDrop(slot) {
   slot.addEventListener("dragover", (event) => {
     event.preventDefault();
     slot.classList.add("is-drop-target");
-    event.dataTransfer.dropEffect = "copy";
+    event.dataTransfer.dropEffect = state.dragSlotIndex !== null ? "move" : "copy";
   });
 
   slot.addEventListener("dragleave", () => {
@@ -1394,10 +1411,43 @@ function attachSlotDrop(slot) {
       return;
     }
 
+    const sourceSlotValue = event.dataTransfer.getData("application/x-slot-index");
+    const sourceSlotIndex = sourceSlotValue === "" ? NaN : Number(sourceSlotValue);
+    if (Number.isInteger(sourceSlotIndex)) {
+      swapSlots(sourceSlotIndex, slotIndex);
+      state.dragPhotoId = null;
+      state.dragSlotIndex = null;
+      return;
+    }
+
     const photoId = event.dataTransfer.getData("application/x-photo-id") || state.dragPhotoId;
     if (photoId) {
       assignPhotoToSlot(photoId, slotIndex);
     }
+  });
+}
+
+function attachSlotDrag(slot, photo) {
+  slot.addEventListener("dragstart", (event) => {
+    const slotIndex = Number(slot.dataset.slotIndex);
+    state.dragPhotoId = photo.id;
+    state.dragSlotIndex = slotIndex;
+    slot.classList.add("is-drag-source");
+    slot.classList.remove("is-panning");
+    delete slot.dataset.panStart;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-photo-id", photo.id);
+    event.dataTransfer.setData("application/x-slot-index", String(slotIndex));
+    event.dataTransfer.setData("text/plain", photo.id);
+  });
+
+  slot.addEventListener("dragend", () => {
+    slot.classList.remove("is-drag-source");
+    state.dragPhotoId = null;
+    state.dragSlotIndex = null;
+    document.querySelectorAll(".slot.is-drop-target").forEach((target) => {
+      target.classList.remove("is-drop-target");
+    });
   });
 }
 

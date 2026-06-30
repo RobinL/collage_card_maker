@@ -376,6 +376,10 @@ button:disabled {
   cursor: grabbing;
 }
 
+.slot.is-drag-source {
+  opacity: 0.62;
+}
+
 .slot.is-empty {
   display: grid;
   place-items: center;
