@@ -376,6 +376,13 @@ button:disabled {
   cursor: grabbing;
 }
 
+.editing-hint {
+  margin: 10px 0 0;
+  color: #66736d;
+  font-size: 0.78rem;
+  text-align: center;
+}
+
 .slot.is-drag-source {
   opacity: 0.62;
 }

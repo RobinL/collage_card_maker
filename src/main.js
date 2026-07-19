@@ -120,6 +120,7 @@ app.innerHTML = `
           <div id="frontPanel" class="front-panel"></div>
           <div id="foldLine" class="fold-line" aria-hidden="true"></div>
         </div>
+        <p class="editing-hint">Drag to pan · Scroll or pinch to zoom · Shift-drag to move</p>
       </div>
     </section>
   </main>
@@ -1279,8 +1280,14 @@ function renderSheet() {
       }
       slot.addEventListener("pointerdown", (event) => {
         if (event.target.closest(".recursive-pane-controls")) return;
+        if (state.activeRecursiveId === cell.nodeId) return;
+
         state.activeRecursiveId = cell.nodeId;
-        renderSheet();
+        els.frontPanel.querySelector(".slot.is-active-recursive")
+          ?.classList.remove("is-active-recursive");
+        els.frontPanel.querySelector(".recursive-pane-controls")?.remove();
+        slot.classList.add("is-active-recursive");
+        renderRecursivePaneControls(slot, cell.nodeId);
       }, { capture: true });
     }
 
@@ -1291,7 +1298,6 @@ function renderSheet() {
       image.alt = "";
       image.dataset.photoId = photo.id;
       slot.classList.add("is-filled");
-      slot.draggable = true;
       slot.append(image);
       attachImageEditing(slot, photo);
       attachSlotDrag(slot, photo);
@@ -1428,7 +1434,27 @@ function attachSlotDrop(slot) {
 }
 
 function attachSlotDrag(slot, photo) {
+  slot.draggable = false;
+
+  slot.addEventListener("pointerdown", (event) => {
+    slot.draggable = event.button === 0 && event.shiftKey;
+  });
+
+  slot.addEventListener("pointerup", () => {
+    slot.draggable = false;
+  });
+
+  slot.addEventListener("pointercancel", () => {
+    slot.draggable = false;
+  });
+
   slot.addEventListener("dragstart", (event) => {
+    if (!event.shiftKey) {
+      event.preventDefault();
+      slot.draggable = false;
+      return;
+    }
+
     const slotIndex = Number(slot.dataset.slotIndex);
     state.dragPhotoId = photo.id;
     state.dragSlotIndex = slotIndex;
@@ -1442,6 +1468,7 @@ function attachSlotDrag(slot, photo) {
   });
 
   slot.addEventListener("dragend", () => {
+    slot.draggable = false;
     slot.classList.remove("is-drag-source");
     state.dragPhotoId = null;
     state.dragSlotIndex = null;
@@ -1461,7 +1488,7 @@ function attachImageEditing(slot, photo) {
   }, { passive: false });
 
   slot.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || event.shiftKey) return;
     const placement = getPlacement(photo.id);
     const metrics = getImageMetrics(slot, photo, placement);
     slot.setPointerCapture(event.pointerId);
