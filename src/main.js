@@ -20,6 +20,7 @@ const state = {
   nextRecursiveSplitId: 1,
   gapMm: 3,
   marginMm: 4,
+  manualLayouts: new Map(),
   photos: [],
   slots: [],
   placements: new Map(),
@@ -120,7 +121,7 @@ app.innerHTML = `
           <div id="frontPanel" class="front-panel"></div>
           <div id="foldLine" class="fold-line" aria-hidden="true"></div>
         </div>
-        <p class="editing-hint">Drag to pan · Scroll or pinch to zoom · Shift-drag to move</p>
+        <p class="editing-hint">Drag gaps to resize · Drag photos to pan · Scroll or pinch to zoom · Shift-drag to move</p>
       </div>
     </section>
   </main>
@@ -437,6 +438,12 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
   if (state.layoutMode === "recursive") {
     return layoutRecursive(panelWidth, panelHeight, gap, margin).cells;
   }
+
+  const manualLayout = state.manualLayouts.get(getManualLayoutKey(slotCount));
+  if (manualLayout) {
+    return denormalizeCells(manualLayout, panelWidth, panelHeight);
+  }
+
   if (state.layoutMode === "feature") {
     return layoutFeature(slotCount, panelWidth, panelHeight, gap, margin);
   }
@@ -459,6 +466,40 @@ function buildCells(panelWidth, panelHeight, gap, margin) {
     return layoutPacked(slotCount, panelWidth, panelHeight, gap, margin, aspects);
   }
   return layoutAuto(slotCount, panelWidth, panelHeight, gap, margin, aspects);
+}
+
+function getManualLayoutKey(slotCount = getSlotCount()) {
+  const pageArea = isFullPage() ? "full" : "half";
+  const packVersion = state.layoutMode === "pack" ? state.packSeed : 0;
+  return [
+    state.layoutMode,
+    state.orientation,
+    pageArea,
+    slotCount,
+    state.gapMm,
+    state.marginMm,
+    packVersion,
+  ].join("|");
+}
+
+function normalizeCells(cells, panelWidth, panelHeight) {
+  return cells.map((cell) => ({
+    index: cell.index,
+    x: cell.x / panelWidth,
+    y: cell.y / panelHeight,
+    width: cell.width / panelWidth,
+    height: cell.height / panelHeight,
+  }));
+}
+
+function denormalizeCells(cells, panelWidth, panelHeight) {
+  return cells.map((cell) => ({
+    index: cell.index,
+    x: cell.x * panelWidth,
+    y: cell.y * panelHeight,
+    width: cell.width * panelWidth,
+    height: cell.height * panelHeight,
+  }));
 }
 
 function layoutRecursive(panelWidth, panelHeight, gap, margin) {
@@ -522,6 +563,112 @@ function layoutRecursive(panelWidth, panelHeight, gap, margin) {
 
   walk(state.recursiveTree, root);
   return { cells, dividers };
+}
+
+function buildCellDividers(cells, gap) {
+  const candidates = [];
+  const edgeTolerance = 1.5;
+  const minimumOverlap = 2;
+
+  function addCandidate(orientation, position, start, end, beforeIndex, afterIndex) {
+    if (end - start < minimumOverlap) return;
+    candidates.push({
+      orientation,
+      position,
+      start,
+      end,
+      before: new Set([beforeIndex]),
+      after: new Set([afterIndex]),
+    });
+  }
+
+  for (let firstIndex = 0; firstIndex < cells.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < cells.length; secondIndex += 1) {
+      const first = cells[firstIndex];
+      const second = cells[secondIndex];
+      const firstRight = first.x + first.width;
+      const secondRight = second.x + second.width;
+      const firstBottom = first.y + first.height;
+      const secondBottom = second.y + second.height;
+
+      if (Math.abs(firstRight + gap - second.x) <= edgeTolerance) {
+        addCandidate(
+          "vertical",
+          (firstRight + second.x) / 2,
+          Math.max(first.y, second.y),
+          Math.min(firstBottom, secondBottom),
+          first.index,
+          second.index,
+        );
+      } else if (Math.abs(secondRight + gap - first.x) <= edgeTolerance) {
+        addCandidate(
+          "vertical",
+          (secondRight + first.x) / 2,
+          Math.max(first.y, second.y),
+          Math.min(firstBottom, secondBottom),
+          second.index,
+          first.index,
+        );
+      }
+
+      if (Math.abs(firstBottom + gap - second.y) <= edgeTolerance) {
+        addCandidate(
+          "horizontal",
+          (firstBottom + second.y) / 2,
+          Math.max(first.x, second.x),
+          Math.min(firstRight, secondRight),
+          first.index,
+          second.index,
+        );
+      } else if (Math.abs(secondBottom + gap - first.y) <= edgeTolerance) {
+        addCandidate(
+          "horizontal",
+          (secondBottom + first.y) / 2,
+          Math.max(first.x, second.x),
+          Math.min(firstRight, secondRight),
+          second.index,
+          first.index,
+        );
+      }
+    }
+  }
+
+  const joinTolerance = Math.max(edgeTolerance, gap + edgeTolerance);
+  const groups = [];
+
+  candidates
+    .sort((a, b) => a.orientation.localeCompare(b.orientation)
+      || a.position - b.position
+      || a.start - b.start)
+    .forEach((candidate) => {
+      const group = groups.find((item) => (
+        item.orientation === candidate.orientation
+        && Math.abs(item.position - candidate.position) <= edgeTolerance
+        && candidate.start <= item.end + joinTolerance
+        && candidate.end >= item.start - joinTolerance
+      ));
+
+      if (!group) {
+        groups.push(candidate);
+        return;
+      }
+
+      group.start = Math.min(group.start, candidate.start);
+      group.end = Math.max(group.end, candidate.end);
+      candidate.before.forEach((index) => group.before.add(index));
+      candidate.after.forEach((index) => group.after.add(index));
+    });
+
+  return groups.map((group, index) => ({
+    id: `layout-divider-${index}`,
+    orientation: group.orientation,
+    x: group.orientation === "vertical" ? group.position : group.start,
+    y: group.orientation === "vertical" ? group.start : group.position,
+    width: group.orientation === "vertical" ? 0 : group.end - group.start,
+    height: group.orientation === "vertical" ? group.end - group.start : 0,
+    before: [...group.before],
+    after: [...group.after],
+  }));
 }
 
 function layoutPacked(count, panelWidth, panelHeight, gap, margin, aspects) {
@@ -1247,10 +1394,11 @@ function renderSheet() {
   const front = metrics.front;
   const gap = mmToPreviewPx(state.gapMm);
   const margin = mmToPreviewPx(state.marginMm);
-  const recursiveLayout = state.layoutMode === "recursive"
+  const layout = state.layoutMode === "recursive"
     ? layoutRecursive(front.width, front.height, gap, margin)
     : null;
-  const cells = recursiveLayout?.cells ?? buildCells(front.width, front.height, gap, margin);
+  const cells = layout?.cells ?? buildCells(front.width, front.height, gap, margin);
+  const layoutDividers = layout?.dividers ?? buildCellDividers(cells, gap);
 
   els.sheet.className = `sheet ${state.orientation} front-${getFrontSide()}`;
   els.frontPanel.style.left = `${(front.x / metrics.sheetWidth) * 100}%`;
@@ -1312,8 +1460,10 @@ function renderSheet() {
     els.frontPanel.append(slot);
   }
 
-  if (recursiveLayout) {
-    renderRecursiveDividers(recursiveLayout.dividers, front);
+  if (state.layoutMode === "recursive") {
+    renderRecursiveDividers(layoutDividers, front);
+  } else {
+    renderCellDividers(layoutDividers, front);
   }
 
   requestAnimationFrame(positionImages);
@@ -1381,6 +1531,32 @@ function renderRecursiveDividers(dividers, front) {
     control.dataset.usableSize = String(divider.usableSize);
     control.setAttribute("aria-label", "Resize split");
     control.addEventListener("pointerdown", startRecursiveResize);
+
+    if (divider.orientation === "vertical") {
+      control.style.left = `${(divider.x / front.width) * 100}%`;
+      control.style.top = `${(divider.y / front.height) * 100}%`;
+      control.style.height = `${(divider.height / front.height) * 100}%`;
+    } else {
+      control.style.left = `${(divider.x / front.width) * 100}%`;
+      control.style.top = `${(divider.y / front.height) * 100}%`;
+      control.style.width = `${(divider.width / front.width) * 100}%`;
+    }
+
+    els.frontPanel.append(control);
+  }
+}
+
+function renderCellDividers(dividers, front) {
+  for (const divider of dividers) {
+    const control = document.createElement("button");
+    control.type = "button";
+    control.className = `recursive-divider recursive-divider-${divider.orientation}`;
+    control.dataset.dividerId = divider.id;
+    control.dataset.orientation = divider.orientation;
+    control.dataset.before = divider.before.join(",");
+    control.dataset.after = divider.after.join(",");
+    control.setAttribute("aria-label", "Resize panels");
+    control.addEventListener("pointerdown", startCellResize);
 
     if (divider.orientation === "vertical") {
       control.style.left = `${(divider.x / front.width) * 100}%`;
@@ -1571,6 +1747,112 @@ function updateRecursiveResize(event) {
 
 function endRecursiveResize() {
   if (state.activeResize?.type !== "recursive") return;
+  state.activeResize = null;
+  document.body.classList.remove("is-resizing-recursive");
+}
+
+function startCellResize(event) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const metrics = getSheetMetrics();
+  const front = metrics.front;
+  const gap = mmToPreviewPx(state.gapMm);
+  const margin = mmToPreviewPx(state.marginMm);
+  const panelRect = els.frontPanel.getBoundingClientRect();
+  const orientation = event.currentTarget.dataset.orientation;
+  const scale = orientation === "vertical"
+    ? panelRect.width / front.width
+    : panelRect.height / front.height;
+  const cells = buildCells(front.width, front.height, gap, margin);
+  const before = new Set(event.currentTarget.dataset.before.split(",").map(Number));
+  const after = new Set(event.currentTarget.dataset.after.split(",").map(Number));
+  const beforeCells = cells.filter((cell) => before.has(cell.index));
+  const afterCells = cells.filter((cell) => after.has(cell.index));
+
+  if (!beforeCells.length || !afterCells.length) return;
+
+  const minimumSize = 48 / Math.max(scale, 0.001);
+  const minimumDelta = Math.max(...beforeCells.map((cell) => (
+    orientation === "vertical"
+      ? Math.min(cell.width, minimumSize) - cell.width
+      : Math.min(cell.height, minimumSize) - cell.height
+  )));
+  const maximumDelta = Math.min(...afterCells.map((cell) => (
+    orientation === "vertical"
+      ? cell.width - Math.min(cell.width, minimumSize)
+      : cell.height - Math.min(cell.height, minimumSize)
+  )));
+  const layoutKey = getManualLayoutKey();
+
+  if (!state.manualLayouts.has(layoutKey)) {
+    state.manualLayouts.set(layoutKey, normalizeCells(cells, front.width, front.height));
+  }
+
+  state.activeResize = {
+    type: "cells",
+    orientation,
+    layoutKey,
+    startX: event.clientX,
+    startY: event.clientY,
+    scale,
+    minimumDelta,
+    maximumDelta,
+    before,
+    after,
+    baseCells: cells.map((cell) => ({ ...cell })),
+    panelWidth: front.width,
+    panelHeight: front.height,
+  };
+
+  document.body.classList.add("is-resizing-recursive");
+}
+
+function updateCellResize(event) {
+  if (state.activeResize?.type !== "cells") return;
+
+  const resize = state.activeResize;
+  const pointerDelta = resize.orientation === "vertical"
+    ? event.clientX - resize.startX
+    : event.clientY - resize.startY;
+  const delta = clamp(
+    pointerDelta / Math.max(resize.scale, 0.001),
+    resize.minimumDelta,
+    resize.maximumDelta,
+  );
+  const cells = resize.baseCells.map((cell) => {
+    const next = { ...cell };
+
+    if (resize.before.has(cell.index)) {
+      if (resize.orientation === "vertical") {
+        next.width += delta;
+      } else {
+        next.height += delta;
+      }
+    }
+
+    if (resize.after.has(cell.index)) {
+      if (resize.orientation === "vertical") {
+        next.x += delta;
+        next.width -= delta;
+      } else {
+        next.y += delta;
+        next.height -= delta;
+      }
+    }
+
+    return next;
+  });
+
+  state.manualLayouts.set(
+    resize.layoutKey,
+    normalizeCells(cells, resize.panelWidth, resize.panelHeight),
+  );
+  renderSheet();
+}
+
+function endCellResize() {
+  if (state.activeResize?.type !== "cells") return;
   state.activeResize = null;
   document.body.classList.remove("is-resizing-recursive");
 }
@@ -1766,12 +2048,15 @@ els.mixButton.addEventListener("click", mixPackedLayout);
 els.randomiseButton.addEventListener("click", randomisePhotos);
 window.addEventListener("pointermove", (event) => {
   updateRecursiveResize(event);
+  updateCellResize(event);
 });
 window.addEventListener("pointerup", () => {
   endRecursiveResize();
+  endCellResize();
 });
 window.addEventListener("pointercancel", () => {
   endRecursiveResize();
+  endCellResize();
 });
 
 els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
