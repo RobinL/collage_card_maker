@@ -251,7 +251,7 @@ function getSlotCount() {
   if (state.layoutMode === "recursive") {
     return getRecursiveLeaves().length;
   }
-  return Math.max(state.photos.length, 5);
+  return Math.max(state.photos.length, 2);
 }
 
 function syncSlots() {
